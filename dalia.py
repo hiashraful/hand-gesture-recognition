@@ -1,371 +1,144 @@
 import cv2
 import mediapipe as mp
+import numpy as np
 import asyncio
 import websockets
 import json
 import threading
 import time
-import numpy as np
-import csv
-import copy
-import itertools
-from collections import deque, Counter
-import tensorflow as tf
+import logging
+from collections import Counter, deque
+from model.keypoint_classifier.keypoint_classifier import KeyPointClassifier
+from model.point_history_classifier.point_history_classifier import PointHistoryClassifier
 
-# Add these new imports for the ML-based gesture detection
-class KeyPointClassifier(object):
-    def __init__(
-        self,
-        model_path='model/keypoint_classifier/keypoint_classifier.tflite',
-        num_threads=1,
-    ):
-        self.interpreter = tf.lite.Interpreter(model_path=model_path,
-                                               num_threads=num_threads)
-        self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-    def __call__(self, landmark_list):
-        input_details_tensor_index = self.input_details[0]['index']
-        self.interpreter.set_tensor(
-            input_details_tensor_index,
-            np.array([landmark_list], dtype=np.float32))
-        self.interpreter.invoke()
-
-        output_details_tensor_index = self.output_details[0]['index']
-        result = self.interpreter.get_tensor(output_details_tensor_index)
-        result_index = np.argmax(np.squeeze(result))
-        return result_index
-
-class PointHistoryClassifier(object):
-    def __init__(
-        self,
-        model_path='model/point_history_classifier/point_history_classifier.tflite',
-        score_th=0.5,
-        invalid_value=0,
-        num_threads=1,
-    ):
-        self.interpreter = tf.lite.Interpreter(model_path=model_path,
-                                               num_threads=num_threads)
-        self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
-
-        self.score_th = score_th
-        self.invalid_value = invalid_value
-
-    def __call__(self, point_history_list):
-        input_details_tensor_index = self.input_details[0]['index']
-        self.interpreter.set_tensor(
-            input_details_tensor_index,
-            np.array([point_history_list], dtype=np.float32))
-        self.interpreter.invoke()
-
-        output_details_tensor_index = self.output_details[0]['index']
-        result = self.interpreter.get_tensor(output_details_tensor_index)
-        result_index = np.argmax(np.squeeze(result))
-
-        if np.squeeze(result)[result_index] < self.score_th:
-            result_index = self.invalid_value
-
-        return result_index
-
-# MediaPipe setup
-mp_hands = mp.solutions.hands
-mp_pose = mp.solutions.pose
-mp_draw = mp.solutions.drawing_utils
-
-hands = mp_hands.Hands(
-    model_complexity=1,
-    static_image_mode=False,
-    max_num_hands=2,
-    min_detection_confidence=0.9,
-    min_tracking_confidence=0.7
-)
-
-pose = mp_pose.Pose(
-    static_image_mode=False,
-    min_detection_confidence=0.9,
-    min_tracking_confidence=0.7
-)
-
-# Detection parameters
-MIN_DISTANCE = 0.5  # meters
-MAX_DISTANCE = 2.0  # meters
-CENTER_THRESHOLD = 0.3  # 30% from center
-COOLDOWN_TIME = 10  # seconds
-
-# Camera parameters
-FOCAL_LENGTH = 1000  # pixels
-KNOWN_PERSON_HEIGHT = 1.7  # meters
-
-# Initialize ML classifiers
-keypoint_classifier = KeyPointClassifier()
-point_history_classifier = PointHistoryClassifier()
-
-# Load gesture labels
-def load_labels():
-    """Load gesture labels from CSV files"""
-    keypoint_classifier_labels = []
-    try:
-        with open('model/keypoint_classifier/keypoint_classifier_label.csv',
-                  encoding='utf-8-sig') as f:
-            keypoint_classifier_labels = [row[0] for row in csv.reader(f)]
-    except FileNotFoundError:
-        # Default labels if file doesn't exist
-        keypoint_classifier_labels = ['👍 Thumbs Up', '✌️ Peace Sign', '🖕 Middle Finger', 
-                                    '🤘 Heavy Metal', '🤟 Our Sign']
-    
-    point_history_classifier_labels = []
-    try:
-        with open('model/point_history_classifier/point_history_classifier_label.csv',
-                  encoding='utf-8-sig') as f:
-            point_history_classifier_labels = [row[0] for row in csv.reader(f)]
-    except FileNotFoundError:
-        point_history_classifier_labels = ['Stop', 'Clockwise', 'Counter Clockwise', 'Move']
-    
-    return keypoint_classifier_labels, point_history_classifier_labels
-
-keypoint_classifier_labels, point_history_classifier_labels = load_labels()
-
-# Coordinate history for dynamic gestures
-history_length = 16
-point_history = deque(maxlen=history_length)
-finger_gesture_history = deque(maxlen=history_length)
-
+connected_clients = set()
+data_lock = threading.Lock()
 current_data = {
     "person_count": 0,
-    "gesture": "🤷 Unknown",
+    "gesture": "unknown",
     "timestamp": time.time(),
-    "status": "running",
+    "status": "starting",
     "detection_triggered": False,
     "last_trigger_time": 0
 }
 
-connected_clients = set()
-data_lock = threading.Lock()
+MIN_DISTANCE = 0.5
+MAX_DISTANCE = 2.0
+CENTER_THRESHOLD = 0.3
+COOLDOWN_TIME = 10
+
+mp_hands = mp.solutions.hands
+mp_pose = mp.solutions.pose
+mp_draw = mp.solutions.drawing_utils
+
+def load_keypoint_classifier():
+    try:
+        keypoint_classifier = KeyPointClassifier()
+        with open('model/keypoint_classifier/keypoint_classifier_label.csv', encoding='utf-8-sig') as f:
+            keypoint_classifier_labels = [row[0] for row in [line.strip().split(',') for line in f]]
+        return keypoint_classifier, keypoint_classifier_labels
+    except Exception as e:
+        logger.error(f"Error loading keypoint classifier: {e}")
+        return None, ["unknown"]
+
+def load_point_history_classifier():
+    try:
+        point_history_classifier = PointHistoryClassifier()
+        with open('model/point_history_classifier/point_history_classifier_label.csv', encoding='utf-8-sig') as f:
+            point_history_classifier_labels = [row[0] for row in [line.strip().split(',') for line in f]]
+        return point_history_classifier, point_history_classifier_labels
+    except Exception as e:
+        logger.error(f"Error loading point history classifier: {e}")
+        return None, ["unknown"]
 
 def calc_landmark_list(image, landmarks):
-    """Calculate landmark list from MediaPipe hand landmarks"""
     image_width, image_height = image.shape[1], image.shape[0]
     landmark_point = []
-
     for _, landmark in enumerate(landmarks.landmark):
         landmark_x = min(int(landmark.x * image_width), image_width - 1)
         landmark_y = min(int(landmark.y * image_height), image_height - 1)
         landmark_point.append([landmark_x, landmark_y])
-
     return landmark_point
 
 def pre_process_landmark(landmark_list):
-    """Preprocess landmark coordinates for ML model"""
-    temp_landmark_list = copy.deepcopy(landmark_list)
-
-    # Convert to relative coordinates
-    base_x, base_y = 0, 0
+    temp_landmark_list = landmark_list.copy()
+    base_x, base_y = temp_landmark_list[0][0], temp_landmark_list[0][1]
     for index, landmark_point in enumerate(temp_landmark_list):
-        if index == 0:
-            base_x, base_y = landmark_point[0], landmark_point[1]
-
         temp_landmark_list[index][0] = temp_landmark_list[index][0] - base_x
         temp_landmark_list[index][1] = temp_landmark_list[index][1] - base_y
-
-    # Convert to a one-dimensional list
-    temp_landmark_list = list(itertools.chain.from_iterable(temp_landmark_list))
-
-    # Normalization
+    temp_landmark_list = list(np.array(temp_landmark_list).flatten())
     max_value = max(list(map(abs, temp_landmark_list)))
-
     def normalize_(n):
         return n / max_value
-
     temp_landmark_list = list(map(normalize_, temp_landmark_list))
-
     return temp_landmark_list
 
 def pre_process_point_history(image, point_history):
-    """Preprocess point history for dynamic gesture recognition"""
     image_width, image_height = image.shape[1], image.shape[0]
-    temp_point_history = copy.deepcopy(point_history)
-
-    # Convert to relative coordinates
-    base_x, base_y = 0, 0
+    temp_point_history = point_history.copy()
+    base_x, base_y = temp_point_history[0][0], temp_point_history[0][1]
     for index, point in enumerate(temp_point_history):
-        if index == 0:
-            base_x, base_y = point[0], point[1]
-
         temp_point_history[index][0] = (temp_point_history[index][0] - base_x) / image_width
         temp_point_history[index][1] = (temp_point_history[index][1] - base_y) / image_height
-
-    # Convert to a one-dimensional list
-    temp_point_history = list(itertools.chain.from_iterable(temp_point_history))
-
+    temp_point_history = list(np.array(temp_point_history).flatten())
     return temp_point_history
 
-def estimate_distance(person_height_pixels, frame_height):
-    """Estimate distance using person height in pixels"""
-    if person_height_pixels <= 0:
-        return None
-    
-    distance = (KNOWN_PERSON_HEIGHT * FOCAL_LENGTH) / person_height_pixels
-    return distance
-
-def is_person_centered(pose_landmarks, frame_width):
-    """Check if person is centered in the frame"""
-    if not pose_landmarks:
-        return False
-    
-    nose = pose_landmarks.landmark[0]
-    if nose.visibility < 0.5:
-        return False
-    
-    center_x = nose.x
-    center_offset = abs(center_x - 0.5)
-    
-    return center_offset <= CENTER_THRESHOLD
-
-def get_person_height_pixels(pose_landmarks, frame_height):
-    """Calculate person height in pixels"""
-    if not pose_landmarks:
-        return 0
-    
-    landmarks = pose_landmarks.landmark
-    
-    key_points = [
-        (landmarks[0], "nose"),
-        (landmarks[11], "left_shoulder"),
-        (landmarks[12], "right_shoulder"),
-        (landmarks[23], "left_hip"),
-        (landmarks[24], "right_hip"),
-        (landmarks[27], "left_ankle"),
-        (landmarks[28], "right_ankle")
+def detect_person(pose_landmarks):
+    required_landmarks = [
+        mp_pose.PoseLandmark.NOSE,
+        mp_pose.PoseLandmark.LEFT_SHOULDER,
+        mp_pose.PoseLandmark.RIGHT_SHOULDER,
+        mp_pose.PoseLandmark.LEFT_HIP,
+        mp_pose.PoseLandmark.RIGHT_HIP
     ]
     
-    visible_points = []
-    for landmark, name in key_points:
-        if landmark.visibility > 0.5:
-            visible_points.append(landmark.y * frame_height)
-    
-    if len(visible_points) < 3:
-        return 0
-    
-    height_pixels = max(visible_points) - min(visible_points)
-    return height_pixels
-
-def check_detection_conditions(pose_landmarks, frame_width, frame_height):
-    """Check if person meets all detection conditions"""
-    if not pose_landmarks:
-        return False, None, None
-    
-    if not is_person_centered(pose_landmarks, frame_width):
-        return False, None, None
-    
-    height_pixels = get_person_height_pixels(pose_landmarks, frame_height)
-    if height_pixels <= 0:
-        return False, None, None
-    
-    distance = estimate_distance(height_pixels, frame_height)
-    if distance is None:
-        return False, None, None
-    
-    in_range = MIN_DISTANCE <= distance <= MAX_DISTANCE
-    
-    return in_range, distance, height_pixels
-
-def should_trigger_detection():
-    """Check if enough time has passed since last detection"""
-    current_time = time.time()
-    time_since_last = current_time - current_data["last_trigger_time"]
-    return time_since_last >= COOLDOWN_TIME
-
-def detect_person(pose_landmarks):
-    """Detect if a person is present"""
-    if not pose_landmarks:
-        return False
-    
-    key_points = [0, 2, 5, 11, 12, 13, 14, 15, 16]
     visible_count = 0
-    
-    for idx in key_points:
-        if pose_landmarks.landmark[idx].visibility > 0.5:
+    for landmark_id in required_landmarks:
+        landmark = pose_landmarks.landmark[landmark_id]
+        if landmark.visibility > 0.5:
             visible_count += 1
     
-    return visible_count >= 5
+    return visible_count >= 3
 
-def update_detection_data(hand_result, pose_result, frame_width, frame_height, img):
-    """Update detection data with ML-based gesture recognition"""
-    global current_data, point_history, finger_gesture_history
+def check_detection_conditions(pose_landmarks, frame_width, frame_height):
+    left_shoulder = pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_SHOULDER]
+    right_shoulder = pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_SHOULDER]
+    left_hip = pose_landmarks.landmark[mp_pose.PoseLandmark.LEFT_HIP]
+    right_hip = pose_landmarks.landmark[mp_pose.PoseLandmark.RIGHT_HIP]
     
+    shoulder_width = abs(right_shoulder.x - left_shoulder.x)
+    torso_height = abs((left_shoulder.y + right_shoulder.y) / 2 - (left_hip.y + right_hip.y) / 2)
+    
+    distance_estimate = 1.0 / (shoulder_width + 0.001)
+    height_pixels = torso_height * frame_height
+    
+    center_x = (left_shoulder.x + right_shoulder.x) / 2
+    distance_from_center = abs(center_x - 0.5)
+    
+    in_distance_range = MIN_DISTANCE <= distance_estimate <= MAX_DISTANCE
+    in_center = distance_from_center <= CENTER_THRESHOLD
+    
+    return in_distance_range and in_center, distance_estimate, height_pixels
+
+def should_trigger_detection():
     with data_lock:
-        person_count = 0
-        gesture = "🤷 Unknown"
-        detection_triggered = False
-        
-        # Person detection
-        if pose_result.pose_landmarks:
-            if detect_person(pose_result.pose_landmarks):
-                person_count = 1
-                
-                in_range, distance, height_pixels = check_detection_conditions(
-                    pose_result.pose_landmarks, frame_width, frame_height
-                )
-                
-                if in_range and should_trigger_detection():
-                    detection_triggered = True
-                    current_data["last_trigger_time"] = time.time()
-        
-        # Hand gesture recognition using ML
-        if hand_result.multi_hand_landmarks:
-            for hand_landmarks in hand_result.multi_hand_landmarks:
-                # Calculate landmark list
-                landmark_list = calc_landmark_list(img, hand_landmarks)
-                
-                # Preprocess landmarks for keypoint classifier
-                pre_processed_landmark_list = pre_process_landmark(landmark_list)
-                
-                # Hand sign classification
-                hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
-                
-                # Update point history for finger gesture classification
-                if hand_sign_id == 2:  # Pointing gesture (adjust based on your model)
-                    point_history.append(landmark_list[8])  # Index finger tip
-                else:
-                    point_history.append([0, 0])
-                
-                # Finger gesture classification (dynamic movements)
-                finger_gesture_id = 0
-                if len(point_history) == history_length:
-                    pre_processed_point_history_list = pre_process_point_history(img, point_history)
-                    finger_gesture_id = point_history_classifier(pre_processed_point_history_list)
-                
-                # Update finger gesture history
-                finger_gesture_history.append(finger_gesture_id)
-                most_common_fg_id = Counter(finger_gesture_history).most_common()
-                
-                # Get gesture label
-                if hand_sign_id < len(keypoint_classifier_labels):
-                    gesture = keypoint_classifier_labels[hand_sign_id]
-                    break
-        else:
-            point_history.append([0, 0])
-        
-        current_data = {
-            "person_count": person_count,
-            "gesture": gesture,
-            "timestamp": time.time(),
-            "status": "running",
-            "detection_triggered": detection_triggered,
-            "last_trigger_time": current_data["last_trigger_time"]
-        }
+        time_since_last = time.time() - current_data["last_trigger_time"]
+        return time_since_last >= COOLDOWN_TIME
 
-# WebSocket handling remains the same
-async def websocket_handler(websocket):
-    connected_clients.add(websocket)
-    
+async def websocket_handler(websocket, path=""):
+    client_ip = "unknown"
     try:
+        client_ip = websocket.remote_address[0] if websocket.remote_address else "unknown"
+        logger.info(f"Client connected from {client_ip}")
+        connected_clients.add(websocket)
+        
         welcome_msg = {
             "type": "connection",
-            "message": "Connected to person and gesture detection"
+            "message": "Connected to person and gesture detection",
+            "timestamp": time.time()
         }
         await websocket.send(json.dumps(welcome_msg))
         
@@ -373,19 +146,28 @@ async def websocket_handler(websocket):
             try:
                 data = json.loads(message)
                 if data.get("type") == "ping":
-                    await websocket.send(json.dumps({"type": "pong"}))
-            except:
-                pass
+                    await websocket.send(json.dumps({
+                        "type": "pong", 
+                        "timestamp": time.time()
+                    }))
+            except json.JSONDecodeError:
+                logger.warning(f"Invalid JSON from {client_ip}")
+                continue
+            except Exception as e:
+                logger.error(f"Error processing message from {client_ip}: {e}")
+                break
         
-    except (websockets.exceptions.ConnectionClosed, 
-            websockets.exceptions.InvalidMessage, 
-            websockets.exceptions.ConnectionClosedError,
-            EOFError):
-        pass
-    except Exception:
-        pass
+    except websockets.exceptions.ConnectionClosed:
+        logger.info(f"Client {client_ip} disconnected normally")
+    except websockets.exceptions.InvalidMessage as e:
+        logger.info(f"Invalid WebSocket handshake from {client_ip}: {e}")
+    except websockets.exceptions.ConnectionClosedError:
+        logger.info(f"Connection closed unexpectedly for {client_ip}")
+    except Exception as e:
+        logger.error(f"Unexpected error for client {client_ip}: {e}")
     finally:
         connected_clients.discard(websocket)
+        logger.info(f"Client {client_ip} cleaned up")
 
 async def broadcast_data():
     while True:
@@ -394,10 +176,12 @@ async def broadcast_data():
                 message = json.dumps(current_data)
             
             disconnected_clients = set()
-            for client in connected_clients:
+            for client in connected_clients.copy():
                 try:
                     await client.send(message)
-                except:
+                except websockets.exceptions.ConnectionClosed:
+                    disconnected_clients.add(client)
+                except Exception:
                     disconnected_clients.add(client)
             
             for client in disconnected_clients:
@@ -407,101 +191,171 @@ async def broadcast_data():
 
 def start_websocket_server():
     async def server():
-        server = await websockets.serve(
-            websocket_handler, 
-            "localhost", 
-            8765,
-            ping_interval=10,
-            ping_timeout=5,
-            max_size=2**16
-        )
-        
-        broadcast_task = asyncio.create_task(broadcast_data())
-        
         try:
-            await server.wait_closed()
-        except KeyboardInterrupt:
-            broadcast_task.cancel()
-            server.close()
-            await server.wait_closed()
+            server = await websockets.serve(
+                websocket_handler, 
+                "localhost", 
+                8765,
+                ping_interval=20,
+                ping_timeout=10,
+                max_size=2**16,
+                compression=None,
+                process_request=None
+            )
+            
+            logger.info("WebSocket server started on localhost:8765")
+            broadcast_task = asyncio.create_task(broadcast_data())
+            
+            try:
+                await server.wait_closed()
+            except KeyboardInterrupt:
+                logger.info("Shutting down WebSocket server...")
+                broadcast_task.cancel()
+                server.close()
+                await server.wait_closed()
+        except Exception as e:
+            logger.error(f"WebSocket server error: {e}")
     
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    loop.run_until_complete(server())
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(server())
+    except Exception as e:
+        logger.error(f"Failed to start WebSocket server: {e}")
 
 def main():
     global current_data
     
+    logger.info("Starting WebSocket server...")
     websocket_thread = threading.Thread(target=start_websocket_server, daemon=True)
     websocket_thread.start()
     
+    time.sleep(2)
+    
+    logger.info("Loading ML models...")
+    keypoint_classifier, keypoint_classifier_labels = load_keypoint_classifier()
+    point_history_classifier, point_history_classifier_labels = load_point_history_classifier()
+    
+    if not keypoint_classifier:
+        logger.error("Failed to load keypoint classifier")
+        return
+    
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 400)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FPS, 30)
+    
+    if not cap.isOpened():
+        logger.error("Cannot open camera")
+        return
+    
+    hands = mp_hands.Hands(
+        static_image_mode=False,
+        max_num_hands=2,
+        min_detection_confidence=0.7,
+        min_tracking_confidence=0.5,
+        model_complexity=0
+    )
+    
+    pose = mp_pose.Pose(
+        static_image_mode=False,
+        model_complexity=1,
+        smooth_landmarks=True,
+        enable_segmentation=False,
+        smooth_segmentation=True,
+        min_detection_confidence=0.5,
+        min_tracking_confidence=0.5
+    )
+    
+    history_length = 16
+    point_history = deque(maxlen=history_length)
+    finger_gesture_history = deque(maxlen=history_length)
     
     show_video = True
     
+    logger.info("Starting main detection loop...")
+    
     try:
         while True:
-            success, img = cap.read()
-            if not success:
+            ret, img = cap.read()
+            if not ret:
+                logger.error("Failed to capture frame")
                 break
             
             img = cv2.flip(img, 1)
+            debug_img = img.copy()
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            img_rgb.flags.writeable = False
+            
+            frame_height, frame_width = img.shape[:2]
             
             hand_result = hands.process(img_rgb)
             pose_result = pose.process(img_rgb)
             
-            frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-            frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+            img_rgb.flags.writeable = True
             
-            update_detection_data(hand_result, pose_result, frame_width, frame_height, img)
+            person_count = 0
+            gesture = "unknown"
+            detection_triggered = False
+            
+            if pose_result.pose_landmarks:
+                if detect_person(pose_result.pose_landmarks):
+                    person_count = 1
+                    
+                    in_range, distance, height_pixels = check_detection_conditions(
+                        pose_result.pose_landmarks, frame_width, frame_height
+                    )
+                    
+                    if in_range and should_trigger_detection():
+                        detection_triggered = True
+                        with data_lock:
+                            current_data["last_trigger_time"] = time.time()
+            
+            if hand_result.multi_hand_landmarks:
+                for hand_landmarks in hand_result.multi_hand_landmarks:
+                    landmark_list = calc_landmark_list(img, hand_landmarks)
+                    pre_processed_landmark_list = pre_process_landmark(landmark_list)
+                    hand_sign_id = keypoint_classifier(pre_processed_landmark_list)
+                    
+                    if hand_sign_id == 2:
+                        point_history.append(landmark_list[8])
+                    else:
+                        point_history.append([0, 0])
+                    
+                    finger_gesture_id = 0
+                    if len(point_history) == history_length:
+                        pre_processed_point_history_list = pre_process_point_history(img, point_history)
+                        finger_gesture_id = point_history_classifier(pre_processed_point_history_list)
+                    
+                    finger_gesture_history.append(finger_gesture_id)
+                    most_common_fg_id = Counter(finger_gesture_history).most_common()
+                    
+                    if hand_sign_id < len(keypoint_classifier_labels):
+                        gesture = keypoint_classifier_labels[hand_sign_id]
+                        break
+            else:
+                point_history.append([0, 0])
+            
+            with data_lock:
+                current_data.update({
+                    "person_count": person_count,
+                    "gesture": gesture,
+                    "timestamp": time.time(),
+                    "status": "running",
+                    "detection_triggered": detection_triggered
+                })
             
             if show_video:
-                display_img = img.copy()
-                h, w, c = display_img.shape
+                display_img = debug_img.copy()
                 
-                # # Display detection info
-                # cv2.putText(display_img, f"People: {current_data['person_count']}", (10, 30), 
-                #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                # cv2.putText(display_img, f"Gesture: {current_data['gesture']}", (10, 70), 
-                #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                # cv2.putText(display_img, f"Clients: {len(connected_clients)}", (10, 110), 
-                #            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2)
+                status_color = (0, 255, 0) if person_count > 0 else (0, 0, 255)
+                cv2.putText(display_img, f"Person: {person_count}", (10, 30), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                cv2.putText(display_img, f"Gesture: {gesture}", (10, 70), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                cv2.putText(display_img, f"Clients: {len(connected_clients)}", (10, 110), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
                 
-                # Display detection conditions
-                # if pose_result.pose_landmarks:
-                #     in_range, distance, height_pixels = check_detection_conditions(
-                #         pose_result.pose_landmarks, frame_width, frame_height
-                #     )
-                    
-                #     if distance is not None:
-                #         cv2.putText(display_img, f"Distance: {distance:.2f}m", (10, 150), 
-                #                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-                    
-                #     if in_range:
-                #         cv2.putText(display_img, "IN RANGE", (10, 190), 
-                #                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                #     else:
-                #         cv2.putText(display_img, "OUT OF RANGE", (10, 190), 
-                #                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
-                    
-                #     if current_data["detection_triggered"]:
-                #         cv2.putText(display_img, "TRIGGERED!", (10, 230), 
-                #                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 3)
-                
-                # Display cooldown info
-                time_since_last = time.time() - current_data["last_trigger_time"]
-                if time_since_last < COOLDOWN_TIME:
-                    remaining = COOLDOWN_TIME - time_since_last
-                #     cv2.putText(display_img, f"Cooldown: {remaining:.1f}s", (10, 270), 
-                #                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 255), 2)
-                
-                # cv2.putText(display_img, "Press 'q' to quit, 's' to hide/show video", (10, h - 20), 
-                #            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 1)
-                
-                # Draw hand landmarks
                 if hand_result.multi_hand_landmarks:
                     for hand_landmarks in hand_result.multi_hand_landmarks:
                         mp_draw.draw_landmarks(
@@ -510,7 +364,6 @@ def main():
                             mp_draw.DrawingSpec(color=(0, 255, 0), thickness=2)
                         )
                 
-                # Draw pose landmarks
                 if pose_result.pose_landmarks:
                     mp_draw.draw_landmarks(
                         display_img, pose_result.pose_landmarks, mp_pose.POSE_CONNECTIONS,
@@ -529,19 +382,26 @@ def main():
                     cv2.destroyAllWindows()
     
     except KeyboardInterrupt:
-        pass
-    
+        logger.info("Interrupted by user")
+    except Exception as e:
+        logger.error(f"Error in main loop: {e}")
     finally:
         with data_lock:
             current_data["status"] = "stopped"
         
         cap.release()
         cv2.destroyAllWindows()
+        hands.close()
+        pose.close()
+        logger.info("Cleanup completed")
 
 if __name__ == "__main__":
     try:
         import websockets
+        main()
     except ImportError:
+        logger.error("websockets library not installed")
         exit(1)
-    
-    main()
+    except Exception as e:
+        logger.error(f"Fatal error: {e}")
+        exit(1)
