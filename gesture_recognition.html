@@ -1,0 +1,327 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Digital Comm</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Arial', sans-serif;
+            background: #000;
+            color: white;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        .entry-popup {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .entry-content {
+            text-align: center;
+            background: rgba(255, 255, 255, 0.1);
+            backdrop-filter: blur(10px);
+            border-radius: 20px;
+            padding: 60px 40px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .entry-content h1 {
+            font-size: 3rem;
+            margin-bottom: 40px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+
+        .entry-button {
+            font-size: 1.5rem;
+            padding: 20px 40px;
+            background: linear-gradient(45deg, #ff6b6b, #ffa500);
+            border: none;
+            border-radius: 50px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            box-shadow: 0 8px 20px rgba(255, 107, 107, 0.3);
+        }
+
+        .entry-button:hover {
+            transform: translateY(-3px);
+            box-shadow: 0 12px 30px rgba(255, 107, 107, 0.4);
+        }
+
+        .main-interface {
+            position: relative;
+            width: 100%;
+            height: 100vh;
+            display: none;
+        }
+
+        .video-container {
+            width: 100%;
+            height: 100%;
+            position: relative;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: #000;
+        }
+
+        .main-video {
+            max-width: 100%;
+            max-height: 100%;
+            width: auto;
+            height: auto;
+            object-fit: contain;
+        }
+
+        .info-overlay {
+            position: absolute;
+            top: 20px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 20px;
+            border-radius: 10px;
+            backdrop-filter: blur(5px);
+        }
+
+        .gesture-display {
+            font-size: 2rem;
+            margin-bottom: 10px;
+        }
+
+        .person-count {
+            font-size: 1.2rem;
+            opacity: 0.8;
+        }
+
+        .hidden {
+            display: none !important;
+        }
+
+        @media (max-width: 768px) {
+            .entry-content h1 {
+                font-size: 2rem;
+            }
+
+            .entry-button {
+                font-size: 1.2rem;
+                padding: 15px 30px;
+            }
+
+            .info-overlay {
+                top: 10px;
+                right: 10px;
+                padding: 15px;
+            }
+
+            .gesture-display {
+                font-size: 1.5rem;
+            }
+        }
+    </style>
+</head>
+
+<body>
+    <div class="entry-popup" id="entryPopup">
+        <div class="entry-content">
+            <h1>Welcome to Digital Comm</h1>
+            <button class="entry-button" id="enterButton">Click here to Enter</button>
+        </div>
+    </div>
+
+    <div class="main-interface" id="mainInterface">
+        <div class="video-container">
+            <video class="main-video" id="mainVideo" autoplay>
+                <source src="/videos/interactive_dalia_STANDBY.mp4" type="video/mp4">
+            </video>
+        </div>
+    </div>
+
+    <script>
+        class DigitalCommInterface {
+            constructor() {
+                this.entryPopup = document.getElementById('entryPopup');
+                this.mainInterface = document.getElementById('mainInterface');
+                this.enterButton = document.getElementById('enterButton');
+                this.mainVideo = document.getElementById('mainVideo');
+                this.gestureDisplay = document.getElementById('gestureDisplay');
+                this.personCount = document.getElementById('personCount');
+
+                this.currentPersonCount = 0;
+                this.currentGesture = "🤷 Unknown";
+                this.videoType = 'idle';
+                this.videoStartTime = 0;
+                this.ws = null;
+
+                this.init();
+            }
+
+            init() {
+                this.enterButton.addEventListener('click', () => {
+                    this.enterInterface();
+                });
+            }
+
+            enterInterface() {
+                this.entryPopup.classList.add('hidden');
+                this.mainInterface.style.display = 'block';
+
+                this.startIdleVideo();
+                this.connectWebSocket();
+            }
+
+            startIdleVideo() {
+                this.mainVideo.src = '/videos/interactive_dalia_STANDBY.mp4';
+                this.mainVideo.loop = true;
+                this.mainVideo.muted = true;
+                this.mainVideo.play();
+                this.videoType = 'idle';
+                this.videoStartTime = Date.now();
+            }
+
+            startIntroVideo() {
+                this.mainVideo.src = '/videos/interactive_dalia_INTRO_2.mp4';
+                this.mainVideo.loop = false;
+                this.mainVideo.muted = false;
+                this.mainVideo.play();
+                this.videoType = 'intro';
+                this.videoStartTime = Date.now();
+                // this.startIdleVideo();
+            }
+
+            startThumbsUpVideo() {
+                this.mainVideo.src = '/videos/interactive_dalia_THUMBSUP_finale.mp4';
+                this.mainVideo.loop = false;
+                this.mainVideo.muted = false;
+                this.mainVideo.play();
+                this.videoType = 'thumbsup';
+                this.videoStartTime = Date.now();
+                // this.startIdleVideo();
+            }
+
+            startPeaceVideo() {
+                this.mainVideo.src = '/videos/interactive_dalia_PEACESIGN.mp4';
+                this.mainVideo.loop = false;
+                this.mainVideo.muted = false;
+                this.mainVideo.play();
+                this.videoType = 'peace';
+                this.videoStartTime = Date.now();
+                // this.startIdleVideo();
+            }
+
+            startMiddleVideo(){
+                this.mainVideo.src = '/videos/interactive_dalia_MIDDLEFINGER.mp4';
+                this.mainVideo.loop = false;
+                this.mainVideo.muted = false;
+                this.mainVideo.play();
+                this.videoType = 'middle';
+                this.videoStartTime = Date.now();
+                // this.startIdleVideo();
+            }
+
+            handleVideoEnd() {
+                if (this.videoType === 'thumbsup' || this.videoType === 'peace' || this.videoType === 'middle') {
+                    this.startIdleVideo();
+                }
+            }
+
+            connectWebSocket() {
+                try {
+                    this.ws = new WebSocket('ws://localhost:8765');
+
+                    this.ws.onopen = () => {
+                        console.log('Connected to detection server');
+                    };
+
+                    this.ws.onmessage = (event) => {
+                        try {
+                            const data = JSON.parse(event.data);
+
+                            if (data.type === 'connection') {
+                                return;
+                            }
+
+                            this.updateInterface(data);
+
+                        } catch (e) {
+                            console.error('Error parsing data:', e);
+                        }
+                    };
+
+                    this.ws.onclose = () => {
+                        setTimeout(() => {
+                            this.connectWebSocket();
+                        }, 3000);
+                    };
+
+                    this.ws.onerror = () => {
+                        setTimeout(() => {
+                            this.connectWebSocket();
+                        }, 3000);
+                    };
+
+                } catch (error) {
+                    setTimeout(() => {
+                        this.connectWebSocket();
+                    }, 3000);
+                }
+            }
+
+            updateInterface(data) {
+                const newPersonCount = data.person_count || 0;
+                const newGesture = data.gesture || "🤷 Unknown";
+
+                // if(newPersonCount > 0){
+                //     this.startIntroVideo();
+                // }
+
+                if (newGesture !== this.currentGesture) {
+                    const currentTime = Date.now();
+                    const timeSinceVideoStart = currentTime - this.videoStartTime;
+
+                    if (this.videoType === 'idle') {
+                        if (newGesture.includes('👍') || newGesture.toLowerCase().includes('thumbs')) {
+                            this.startThumbsUpVideo();
+                            console.log(thumbsup)
+                        } else if (newGesture.includes('✌️') || newGesture.toLowerCase().includes('peace')) {
+                            this.startPeaceVideo();
+                        } else if (newGesture.includes('🖕') || newGesture.toLowerCase().includes('middle')) {
+                            this.startMiddleVideo();
+                        }
+                        else {
+                            this.startIdleVideo();
+                        }
+                    }
+                }
+
+                this.currentPersonCount = newPersonCount;
+                this.currentGesture = newGesture;
+
+                // this.gestureDisplay.textContent = this.currentGesture;
+                // this.personCount.textContent = `People: ${this.currentPersonCount}`;
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            new DigitalCommInterface();
+        });
+    </script>
+</body>
+
+</html>
