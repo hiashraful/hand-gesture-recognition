@@ -241,8 +241,8 @@ def main():
         return
     
     cap = cv2.VideoCapture(0)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 480)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 420)
     cap.set(cv2.CAP_PROP_FPS, 30)
     
     if not cap.isOpened():
@@ -349,12 +349,12 @@ def main():
                 display_img = debug_img.copy()
                 
                 status_color = (0, 255, 0) if person_count > 0 else (0, 0, 255)
-                cv2.putText(display_img, f"Person: {person_count}", (10, 30), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
-                cv2.putText(display_img, f"Gesture: {gesture}", (10, 70), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
-                cv2.putText(display_img, f"Clients: {len(connected_clients)}", (10, 110), 
-                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
+                # cv2.putText(display_img, f"Person: {person_count}", (10, 30), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 1, status_color, 2)
+                # cv2.putText(display_img, f"Gesture: {gesture}", (10, 70), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 0), 2)
+                # cv2.putText(display_img, f"Clients: {len(connected_clients)}", (10, 110), 
+                #            cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 0, 255), 2)
                 
                 if hand_result.multi_hand_landmarks:
                     for hand_landmarks in hand_result.multi_hand_landmarks:
