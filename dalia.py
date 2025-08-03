@@ -76,6 +76,7 @@ mp_pose = mp.solutions.pose
 mp_draw = mp.solutions.drawing_utils
 
 hands = mp_hands.Hands(
+    model_complexity=1,
     static_image_mode=False,
     max_num_hands=2,
     min_detection_confidence=0.9,
