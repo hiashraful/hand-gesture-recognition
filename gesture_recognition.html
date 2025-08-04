@@ -95,22 +95,6 @@
         .entry-button:hover {
             transform: scale(1.05);
         }
-
-        .status-indicator {
-            position: absolute;
-            top: 20px;
-            right: 20px;
-            width: 20px;
-            height: 20px;
-            border-radius: 50%;
-            background: #ff4444;
-            z-index: 20;
-            transition: background 0.3s ease;
-        }
-
-        .status-indicator.connected {
-            background: #44ff44;
-        }
     </style>
 </head>
 
@@ -125,7 +109,6 @@
     <div class="video-container">
         <video id="mainVideo" muted></video>
         <div class="transition-overlay" id="transitionOverlay"></div>
-        <div class="status-indicator" id="statusIndicator"></div>
     </div>
 
     <script>
@@ -140,8 +123,8 @@
 
         const videos = {
             standby: '/videos/interactive_dalia_STANDBY.mp4',
-            intro: '/videos/interactive_dalia_INTRO_2.mp4',
-            thumbs_up: '/videos/interactive_dalia_THUMBSUP_finale.mp4',
+            intro: '/videos/interactive_dalia_THUMBSUP_finale.mp4',
+            thumbs_up: '/videos/interactive_dalia_INTRO_2.mp4',
             peace_sign: '/videos/interactive_dalia_PEACESIGN.mp4',
             middle_finger: '/videos/interactive_dalia_MIDDLEFINGER.mp4'
         };
@@ -156,7 +139,6 @@
 
         const video = document.getElementById('mainVideo');
         const overlay = document.getElementById('transitionOverlay');
-        const statusIndicator = document.getElementById('statusIndicator');
 
         function startApp() {
             document.getElementById('entryPopup').style.display = 'none';
@@ -168,11 +150,9 @@
             ws = new WebSocket('ws://localhost:8765');
 
             ws.onopen = () => {
-                statusIndicator.classList.add('connected');
             };
 
             ws.onclose = () => {
-                statusIndicator.classList.remove('connected');
                 setTimeout(connectWebSocket, 2000);
             };
 
